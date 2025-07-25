@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import os
 import databases
 from datetime import timedelta
+from fastapi.middleware.cors import CORSMiddleware
 
 # Ngarkon variablat e mjedisit
 load_dotenv()
@@ -35,8 +36,7 @@ app = FastAPI(
     version="1.0"
 )
 
-from fastapi.middleware.cors import CORSMiddleware
-
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
