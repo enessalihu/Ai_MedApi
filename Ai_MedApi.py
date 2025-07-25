@@ -19,6 +19,8 @@ load_dotenv()
 
 # API Keys
 API_KEYS = set(os.getenv("API_KEYS", "").split(","))
+print("API_KEYS LOADED:", API_KEYS)
+
 
 # MySQL konfigurimi
 DB_USER = os.getenv("DB_USER", "root")
