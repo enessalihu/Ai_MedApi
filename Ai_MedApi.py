@@ -40,7 +40,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://www.shnetpaq.com",
+        "https://shnetpaq.com",
         "http://localhost:3000",
         "http://127.0.0.1:3000"
     ],
