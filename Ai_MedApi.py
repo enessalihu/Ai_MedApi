@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Ngarkon variablat e mjedisit
 load_dotenv()
+print("🔐 API_KEYS nga dotenv:", os.getenv("API_KEYS"))
+print("🔐 API_KEYS set:", API_KEYS)
 
 # API Keys
 API_KEYS = set(os.getenv("API_KEYS", "").split(","))
