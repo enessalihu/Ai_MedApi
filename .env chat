@@ -1,0 +1,10 @@
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx  
+
+# MySQL Database Info
+DB_USER=root
+DB_PASSWORD=****
+DB_HOST=localhost
+DB_PORT=3306
+DB_NAME=shnetpaq
+DB_MIN_POOL=5
+DB_MAX_POOL=20
