@@ -1,0 +1,91 @@
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from dotenv import load_dotenv
+import os
+import databases
+from openai import AsyncOpenAI
+
+# ngarkon .env
+load_dotenv()
+
+# Lexon variablat nga .env
+DATABASE_URL = os.getenv("DATABASE_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Inicializon databazën
+database = databases.Database(DATABASE_URL)
+
+# Inicializon OpenAI client
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# Inicializon FastAPI
+app = FastAPI(title="ShnetPaq Chatbot API")
+
+
+# Model i thjeshtë për request
+class ChatRequest(BaseModel):
+    message: str
+
+
+# lidhet me databazën kur starton serveri
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+
+
+# shkëputet kur ndalet serveri
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
+
+
+# funksion që merr të gjithë doktorët nga databaza
+async def find_doctor() -> list[dict]:
+    query = "SELECT name, specialization FROM doctors"
+    doctors = await database.fetch_all(query)
+    return [dict(row) for row in doctors]
+
+
+# funksion që e pyet ChatGPT me formatim të veçantë
+async def ask_chatgpt(symptom: str, doctors: list[dict]) -> str:
+    doctors_text = "\n".join(
+        [f"- {d['name']} ({d['specialization']})" for d in doctors]
+    )
+    prompt = f"Pacienti thotë: {symptom}"
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"""
+                    Ti je një chatbot mjekësor në gjuhën shqipe.
+                    Përgjigjet e tua DUHET të kenë këtë strukturë:
+
+                    - Përshëndetje dhe ton miqësor
+                    - Mesazh motivues/qetësues
+                    - Lista e shkaqeve të mundshme (1,2,3…)
+                    - Mesazh se nuk duhet të shqetësohet shumë, POR duhet të konsultohet
+                    - Nga lista e doktorëve më poshtë rekomando një që i përshtatet simptomës
+                    {doctors_text}
+                    - Mbylle me: 'Këto mundesh me kontaktu'
+                    """,
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+        )
+        return response.choices[0].message.content.strip() # type: ignore
+    except Exception:
+        return "Ju rekomandoj të konsultoheni me një mjek specialist."
+
+
+# endpoint për chatbotin
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    symptom = request.message
+    doctors = await find_doctor()
+    answer = await ask_chatgpt(symptom, doctors)
+    return JSONResponse({"response": answer})
