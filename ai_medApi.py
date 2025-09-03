@@ -13,36 +13,29 @@ import os
 import databases
 from datetime import timedelta
 from fastapi.middleware.cors import CORSMiddleware
+import re
 
-# Ngarkon variablat e mjedisit
+# 🔑 Load environment variables
 load_dotenv()
-
 API_KEYS = set(os.getenv("API_KEYS", "").split(","))
+print("🔐 API_KEYS:", API_KEYS)
 
-print("🔐 API_KEYS nga dotenv:", os.getenv("API_KEYS"))
-print("🔐 API_KEYS set:", API_KEYS)
-
-# API Keys
-print("API_KEYS LOADED:", API_KEYS)
-
-
-# MySQL konfigurimi
+# ⚙️ MySQL configuration
 DB_USER = os.getenv("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_NAME = os.getenv("DB_NAME", "Ai_Med")
 DB_PORT = int(os.getenv("DB_PORT", 3306))
-
 DATABASE_URL = f"mysql+aiomysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-# Inicioni aplikacionin
+# 🚀 Initialize FastAPI
 app = FastAPI(
     title="Ai_Med API",
-    description="Medical Assistant API with Doctor Recommendations and Advice",
-    version="1.0"
+    description="Medical Assistant API with Doctor Recommendations and Explanations",
+    version="1.3"
 )
 
-# CORS Middleware
+# 🌍 CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -55,7 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Middleware për API Key
+# 🔑 API Key Middleware
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
     api_key = request.headers.get("X-API-Key")
@@ -63,10 +56,20 @@ async def require_api_key(request: Request, call_next):
         return JSONResponse(status_code=403, content={"detail": "Invalid or missing API Key"})
     return await call_next(request)
 
+# 🌐 Translator & DB
 translator = Translator()
 db = databases.Database(DATABASE_URL)
 
-# Funksion për të konvertuar timedelta në string
+# 📝 Optional Hunspell spell checker
+try:
+    import hunspell
+    hunspell_checker = hunspell.HunSpell("./dictionaries/sq_AL.dic", "./dictionaries/sq_AL.aff")
+    print("✅ Albanian dictionary loaded.")
+except Exception as e:
+    print(f"⚠️ Hunspell not available: {e}")
+    hunspell_checker = None
+
+# 🕒 Format time for DB fields
 def format_time(value):
     if isinstance(value, timedelta):
         total_seconds = int(value.total_seconds())
@@ -75,22 +78,18 @@ def format_time(value):
         return f"{hours:02}:{minutes:02}"
     return str(value) if value is not None else None
 
-# Dekorator për matje kohe
+# ⏱️ Async timing decorator
 def timed_async(func):
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        start_time = time.time()
+        start = time.time()
         try:
-            result = await func(*args, **kwargs)
-            end_time = time.time()
-            return result
-        except Exception as e:
-            end_time = time.time()
-            print(f"{func.__name__} failed after {end_time - start_time:.4f} seconds with error: {e}")
-            raise
+            return await func(*args, **kwargs)
+        finally:
+            print(f"⏱️ {func.__name__} took {time.time()-start:.3f}s")
     return wrapper
 
-# Modelet Pydantic
+# 📦 Pydantic Models
 class Doctor(BaseModel):
     name: str
     email: str
@@ -110,13 +109,13 @@ class SpecialtyResponse(BaseModel):
     symptom: str
     specialty: str
 
-class AdviceResponse(BaseModel):
-    advice: str
+class ExplanationResponse(BaseModel):
+    advice: str  # frontend still expects "advice"
 
 class RecommendedDoctorsResponse(BaseModel):
     doctors: List[Doctor]
 
-# Ngarkimi i DB dhe klientit HTTP
+# 🔌 Startup/Shutdown
 @app.on_event("startup")
 async def startup():
     await db.connect()
@@ -127,141 +126,115 @@ async def shutdown():
     await db.disconnect()
     await app.state.http_client.aclose()
 
-# Përkthimi me cache
+# 📝 Spell correction
+def correct_albanian_text(text: str) -> str:
+    if not hunspell_checker:
+        return text
+    corrected = []
+    words = re.findall(r'\b\w+\b|[.,;!?]', text)
+    for w in words:
+        if re.match(r'\b\w+\b', w) and not hunspell_checker.spell(w):
+            suggestions = hunspell_checker.suggest(w)
+            corrected.append(suggestions[0] if suggestions else w)
+        else:
+            corrected.append(w)
+    return ' '.join(corrected).replace(" ,", ",").replace(" .", ".")
+
+async def correct_albanian_text_async(text: str) -> str:
+    return await asyncio.to_thread(correct_albanian_text, text)
+
+# 🌐 Translation with cache
 @functools.lru_cache(maxsize=512)
 def cached_translate(text: str, src: str, dest: str) -> str:
     return translator.translate(text, src=src, dest=dest).text
 
 @timed_async
-async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
-    return await asyncio.to_thread(cached_translate, text, source_lang, target_lang)
+async def translate_text(text: str, source: str, target: str) -> str:
+    return await asyncio.to_thread(cached_translate, text, source, target)
 
-# Merr mjekët sipas specializimit
+# 🧑‍⚕️ DB: doctors by specialty
 @timed_async
 async def fetch_doctors_by_specialty(specialization: str) -> List[Dict]:
-    query = """
-        SELECT name, email, is_admin, specialization, image, bio, quote, working_start, working_end, schooling
-        FROM users
-        WHERE LOWER(specialization) LIKE :specialization
-    """
+    query = """SELECT name, email, is_admin, specialization, image, bio, quote, working_start, working_end, schooling
+               FROM users WHERE LOWER(specialization) LIKE :specialization"""
     rows = await db.fetch_all(query=query, values={"specialization": f"%{specialization.lower()}%"})
-    doctors = []
-    for row in rows:
-        doctors.append({
-            "name": row["name"],
-            "email": row["email"],
-            "is_admin": row["is_admin"],
-            "specialization": row["specialization"],
-            "image": row["image"],
-            "bio": row["bio"],
-            "quote": row["quote"],
-            "working_start": format_time(row["working_start"]),
-            "working_end": format_time(row["working_end"]),
-            "schooling": row["schooling"]
-        })
-    return doctors
+    return [
+        {
+            "name": r["name"], "email": r["email"], "is_admin": r["is_admin"],
+            "specialization": r["specialization"], "image": r["image"],
+            "bio": r["bio"], "quote": r["quote"],
+            "working_start": format_time(r["working_start"]),
+            "working_end": format_time(r["working_end"]),
+            "schooling": r["schooling"]
+        } for r in rows
+    ]
 
-# Thirr modelin AI për gjenerim përgjigjeje
+# 🤖 AI Model Call (Streaming)
 @timed_async
 async def call_model_async(prompt: str) -> str:
     url = "http://localhost:11434/api/generate"
     payload = {"model": "phi3:mini", "prompt": prompt, "stream": True}
-
     try:
-        async with app.state.http_client.stream("POST", url, json=payload, timeout=60) as response:
-            response.raise_for_status()
-            generated_text = ""
-            async for line in response.aiter_lines():
+        async with app.state.http_client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            text = ""
+            async for line in resp.aiter_lines():
                 if not line.strip():
                     continue
                 try:
                     data = json.loads(line)
-                    token = data.get("response", "")
-                    generated_text += token
-                except json.JSONDecodeError as e:
-                    print(f"[streaming] JSON decode error: {e}")
-            return generated_text.strip() or "general practitioner"
+                    text += data.get("response", "")
+                except:
+                    continue
+            return text.strip() or "general practitioner"
     except Exception as e:
-        print(f"[call_model_async - stream] Error: {e}")
+        print(f"[AI error] {e}")
         return "general practitioner"
 
-# Inferenca e specializimit
+# 🔮 Infer specialty
 @timed_async
 async def infer_specialty_async(symptoms: str) -> str:
-    english_symptoms = await translate_text(symptoms, source_lang="sq", target_lang="en")
-    prompt = f"""Patient symptoms: \"{english_symptoms}\".
-Choose the MOST appropriate medical specialist from the list below.
-Respond ONLY with the exact name, no explanation, no punctuation, no context."""
-    raw_output = await call_model_async(prompt)
-    try:
-        parsed = json.loads(raw_output)
-        specialty_en = list(parsed.values())[0].lower()
-    except Exception:
-        specialty_en = raw_output.lower()
-    return specialty_en
+    english = await translate_text(symptoms, "sq", "en")
+    prompt = f'Patient symptoms: "{english}". Respond ONLY with the most appropriate medical specialist.'
+    raw = await call_model_async(prompt)
+    return raw.lower().strip()
 
-# Merr këshillë mjekësore
+# 💬 Explanation only
 @timed_async
-async def get_advice_async(symptoms: str) -> str:
-    english_symptoms = await translate_text(symptoms, source_lang="sq", target_lang="en")
-    prompt = f"""You are a medical assistant. Based on the symptoms: "{english_symptoms}", 
-respond with only one short sentence of first-step medical advice the patient can do on their own.
-Do not mention doctors, hospitals, or professionals."""
-    advice_en = await call_model_async(prompt)
-    advice_sq = await translate_text(advice_en, source_lang="en", target_lang="sq")
-    return advice_sq
+async def get_explanation_async(symptoms: str) -> str:
+    english = await translate_text(symptoms, "sq", "en")
+    prompt = f"""
+You are an empathetic medical information assistant.
+Patient symptoms: "{english}".
+1. Start with a warm, empathetic phrase.
+2. Mention 2–3 common general causes for the symptom.
+3. End with: "This is for informational purposes only. Please consult a doctor."
+"""
+    en = await call_model_async(prompt)
+    return await translate_text(en, "en", "sq")
 
-# Endpointet
-@app.get("/doctors", response_model=List[Doctor], tags=["Doctors"])
-@timed_async
-async def api_fetch_doctors():
-    query = """
-        SELECT name, email, is_admin, specialization, image, bio, quote, working_start, working_end, schooling
-        FROM users
-    """
-    rows = await db.fetch_all(query)
-    if not rows:
-        raise HTTPException(status_code=404, detail="No doctors found")
-    return [
-        {
-            "name": row["name"],
-            "email": row["email"],
-            "is_admin": row["is_admin"],
-            "specialization": row["specialization"],
-            "image": row["image"],
-            "bio": row["bio"],
-            "quote": row["quote"],
-            "working_start": format_time(row["working_start"]),
-            "working_end": format_time(row["working_end"]),
-            "schooling": row["schooling"]
-        }
-        for row in rows
-    ]
+# 🌐 Endpoints
 
 @app.post("/infer-specialty", response_model=SpecialtyResponse, tags=["Inference"])
-@timed_async
-async def api_infer_specialty(req: SymptomsRequest):
-    specialty = await infer_specialty_async(req.symptoms)
-    return {"symptom": req.symptoms, "specialty": specialty}
+async def api_infer(req: SymptomsRequest):
+    corrected = await correct_albanian_text_async(req.symptoms)
+    spec = await infer_specialty_async(corrected)
+    return {"symptom": corrected, "specialty": spec}
 
-@app.post("/advice", response_model=AdviceResponse, tags=["Advice"])
-@timed_async
-async def api_get_advice(req: SymptomsRequest):
-    advice = await get_advice_async(req.symptoms)
-    return {"advice": advice}
+@app.post("/explanation", response_model=ExplanationResponse, tags=["Explanation"])
+async def api_explanation(req: SymptomsRequest):
+    corrected = await correct_albanian_text_async(req.symptoms)
+    expl = await get_explanation_async(corrected)
+    return {"advice": expl}  # still under "advice" key for frontend
 
 @app.post("/recommend-doctors", response_model=RecommendedDoctorsResponse, tags=["Recommendation"])
-@timed_async
-async def api_recommend_doctors(req: SymptomsRequest):
-    specialty_en = await infer_specialty_async(req.symptoms)
-    specialty_al = await translate_text(specialty_en, source_lang="en", target_lang="sq")
-    doctors = await fetch_doctors_by_specialty(specialty_al)
+async def api_recommend(req: SymptomsRequest):
+    corrected = await correct_albanian_text_async(req.symptoms)
+    spec_en = await infer_specialty_async(corrected)
+    spec_sq = await translate_text(spec_en, "en", "sq")
+    doctors = await fetch_doctors_by_specialty(spec_sq)
     if not doctors:
-        query = "SELECT DISTINCT specialization FROM users"
-        rows = await db.fetch_all(query)
-        available_specializations = ", ".join(set(row["specialization"] for row in rows))
-        raise HTTPException(
-            status_code=404,
-            detail=f"No doctors found for specialization '{specialty_al}'. Available: {available_specializations}"
-        )
+        rows = await db.fetch_all("SELECT DISTINCT specialization FROM users")
+        available = ", ".join(set(r["specialization"] for r in rows))
+        raise HTTPException(404, f"No doctors found for '{spec_sq}'. Available: {available}")
     return {"doctors": doctors[:3]}
