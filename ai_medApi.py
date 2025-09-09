@@ -7,7 +7,7 @@ import httpx
 import asyncio
 import time
 import functools
-from deep_translator import GoogleTranslator  # ⬅️ changed from googletrans
+from deep_translator import GoogleTranslator  # ✅ replaced googletrans
 from dotenv import load_dotenv
 import os
 import databases
@@ -15,7 +15,7 @@ from datetime import timedelta
 from fastapi.middleware.cors import CORSMiddleware
 import re
 
-# NEW: OpenAI client (fallback)
+# OpenAI client (fallback)
 from openai import AsyncOpenAI
 
 # 🔑 Load environment variables
@@ -46,7 +46,7 @@ app = FastAPI(
     version="1.4"
 )
 
-# 🌍 CORS Middleware (add more origins if needed)
+# 🌍 CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -128,6 +128,10 @@ class ExplanationResponse(BaseModel):
 class RecommendedDoctorsResponse(BaseModel):
     doctors: List[Doctor]
 
+# 👇 NEW: for /chatbot compatibility
+class ChatRequest(BaseModel):
+    message: str
+
 # 🔌 Startup/Shutdown
 @app.on_event("startup")
 async def startup():
@@ -159,7 +163,7 @@ def correct_albanian_text(text: str) -> str:
 async def correct_albanian_text_async(text: str) -> str:
     return await asyncio.to_thread(correct_albanian_text, text)
 
-# 🌐 Translation with cache (deep-translator version)
+# 🌐 Translation with cache (deep-translator)
 @functools.lru_cache(maxsize=512)
 def cached_translate(text: str, src: str, dest: str) -> str:
     return GoogleTranslator(source=src, target=dest).translate(text)
@@ -285,3 +289,45 @@ async def api_recommend(req: SymptomsRequest):
         available = ", ".join(sorted(set(r["specialization"] for r in rows)))
         raise HTTPException(404, f"No doctors found for '{spec_sq}'. Available: {available}")
     return {"doctors": doctors[:3]}
+
+# -----------------------------
+# NEW: /chatbot (and /chat) endpoints for the website
+# -----------------------------
+@timed_async
+async def build_chatbot_response(user_message_sq: str) -> str:
+    # 1) Explanation (sq)
+    explanation_sq = await get_explanation_async(user_message_sq)
+
+    # 2) Infer specialist (en -> sq for display)
+    spec_en = await infer_specialty_async(user_message_sq)
+    spec_sq = await translate_text(spec_en, "en", "sq")
+
+    # 3) Fetch doctors by specialty (sq)
+    doctors = await fetch_doctors_by_specialty(spec_sq)
+
+    # 4) Compose a friendly reply
+    lines = []
+    lines.append(explanation_sq.strip() if explanation_sq else "Nuk ka këshilla për momentin.")
+    if doctors:
+        lines.append("\n👨‍⚕️ *Mjekët e rekomanduar*:")
+        for i, d in enumerate(doctors[:3], start=1):
+            ws = d.get("working_start") or "—"
+            we = d.get("working_end") or "—"
+            lines.append(f"{i}. {d['name']} - {d['specialization']} (Orari: {ws} - {we})")
+    else:
+        lines.append(f"\n(S’gjetëm mjekë për: {spec_sq}.)")
+    return "\n".join(lines).strip()
+
+@app.post("/chatbot")
+async def chatbot_endpoint(req: ChatRequest):
+    msg = (req.message or "").strip()
+    if not msg:
+        return JSONResponse({"response": "Ju lutem shkruani një simptomë."})
+    corrected = await correct_albanian_text_async(msg)
+    reply = await build_chatbot_response(corrected)
+    return JSONResponse({"response": reply})
+
+# Alias if frontend calls /chat instead of /chatbot
+@app.post("/chat")
+async def chat_alias(req: ChatRequest):
+    return await chatbot_endpoint(req)
