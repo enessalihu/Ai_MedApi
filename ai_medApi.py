@@ -7,7 +7,7 @@ import httpx
 import asyncio
 import time
 import functools
-from googletrans import Translator
+from deep_translator import GoogleTranslator  # ⬅️ changed from googletrans
 from dotenv import load_dotenv
 import os
 import databases
@@ -70,8 +70,7 @@ async def require_api_key(request: Request, call_next):
         return JSONResponse(status_code=403, content={"detail": "Invalid or missing API Key"})
     return await call_next(request)
 
-# 🌐 Translator & DB
-translator = Translator()
+# 🌐 DB
 db = databases.Database(DATABASE_URL)
 
 # 📝 Optional Hunspell spell checker
@@ -160,10 +159,10 @@ def correct_albanian_text(text: str) -> str:
 async def correct_albanian_text_async(text: str) -> str:
     return await asyncio.to_thread(correct_albanian_text, text)
 
-# 🌐 Translation with cache
+# 🌐 Translation with cache (deep-translator version)
 @functools.lru_cache(maxsize=512)
 def cached_translate(text: str, src: str, dest: str) -> str:
-    return translator.translate(text, src=src, dest=dest).text
+    return GoogleTranslator(source=src, target=dest).translate(text)
 
 @timed_async
 async def translate_text(text: str, source: str, target: str) -> str:
