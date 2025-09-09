@@ -15,10 +15,19 @@ from datetime import timedelta
 from fastapi.middleware.cors import CORSMiddleware
 import re
 
+# NEW: OpenAI client (fallback)
+from openai import AsyncOpenAI
+
 # 🔑 Load environment variables
 load_dotenv()
-API_KEYS = set(os.getenv("API_KEYS", "").split(","))
-print("🔐 API_KEYS:", API_KEYS)
+
+# API auth (comma-separated allowed keys)
+API_KEYS = set(filter(None, [s.strip() for s in os.getenv("API_KEYS", "").split(",")]))
+print("🔐 API_KEYS loaded:", bool(API_KEYS))
+
+# ---- OpenAI ----
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ⚙️ MySQL configuration
 DB_USER = os.getenv("DB_USER", "root")
@@ -26,16 +35,18 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_NAME = os.getenv("DB_NAME", "Ai_Med")
 DB_PORT = int(os.getenv("DB_PORT", 3306))
-DATABASE_URL = f"mysql+aiomysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# Prefer a full DATABASE_URL if provided; else build one
+DATABASE_URL = os.getenv("DATABASE_URL") or f"mysql+aiomysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # 🚀 Initialize FastAPI
 app = FastAPI(
     title="Ai_Med API",
     description="Medical Assistant API with Doctor Recommendations and Explanations",
-    version="1.3"
+    version="1.4"
 )
 
-# 🌍 CORS Middleware
+# 🌍 CORS Middleware (add more origins if needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -51,8 +62,11 @@ app.add_middleware(
 # 🔑 API Key Middleware
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
+    # allow health checks without key
+    if request.url.path in ("/", "/healthz"):
+        return await call_next(request)
     api_key = request.headers.get("X-API-Key")
-    if api_key not in API_KEYS:
+    if not API_KEYS or api_key not in API_KEYS:
         return JSONResponse(status_code=403, content={"detail": "Invalid or missing API Key"})
     return await call_next(request)
 
@@ -119,12 +133,15 @@ class RecommendedDoctorsResponse(BaseModel):
 @app.on_event("startup")
 async def startup():
     await db.connect()
+    # one shared HTTP client (used for Ollama and can be reused elsewhere)
     app.state.http_client = httpx.AsyncClient(timeout=60)
+    print("🚀 Startup complete. DB connected.")
 
 @app.on_event("shutdown")
 async def shutdown():
     await db.disconnect()
     await app.state.http_client.aclose()
+    print("🛑 Shutdown complete. DB disconnected.")
 
 # 📝 Spell correction
 def correct_albanian_text(text: str) -> str:
@@ -169,26 +186,49 @@ async def fetch_doctors_by_specialty(specialization: str) -> List[Dict]:
         } for r in rows
     ]
 
-# 🤖 AI Model Call (Streaming)
+# 🤖 AI Model Call with Fallback
 @timed_async
 async def call_model_async(prompt: str) -> str:
-    url = "http://localhost:11434/api/generate"
-    payload = {"model": "phi3:mini", "prompt": prompt, "stream": True}
+    """
+    Try Ollama first (localhost:11434). If unavailable or errors, fall back to OpenAI (gpt-4o-mini).
+    Returns plain text. On total failure, returns a safe default.
+    """
+    # 1) Try Ollama (streaming)
     try:
+        url = "http://localhost:11434/api/generate"
+        payload = {"model": "phi3:mini", "prompt": prompt, "stream": True}
         async with app.state.http_client.stream("POST", url, json=payload) as resp:
             resp.raise_for_status()
             text = ""
             async for line in resp.aiter_lines():
-                if not line.strip():
+                if not line or not line.strip():
                     continue
                 try:
                     data = json.loads(line)
                     text += data.get("response", "")
-                except:
+                except Exception:
                     continue
-            return text.strip() or "general practitioner"
+            if text.strip():
+                return text.strip()
     except Exception as e:
-        print(f"[AI error] {e}")
+        print(f"[Ollama unavailable, falling back to OpenAI] {e}")
+
+    # 2) Fallback to OpenAI
+    try:
+        if not openai_client:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a concise medical triage assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        return content or "general practitioner"
+    except Exception as e:
+        print(f"[OpenAI error] {e}")
         return "general practitioner"
 
 # 🔮 Infer specialty
@@ -215,6 +255,14 @@ Patient symptoms: "{english}".
 
 # 🌐 Endpoints
 
+@app.get("/")
+async def root():
+    return {"status": "ok", "name": "Ai_Med API", "version": "1.4"}
+
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
 @app.post("/infer-specialty", response_model=SpecialtyResponse, tags=["Inference"])
 async def api_infer(req: SymptomsRequest):
     corrected = await correct_albanian_text_async(req.symptoms)
@@ -235,6 +283,6 @@ async def api_recommend(req: SymptomsRequest):
     doctors = await fetch_doctors_by_specialty(spec_sq)
     if not doctors:
         rows = await db.fetch_all("SELECT DISTINCT specialization FROM users")
-        available = ", ".join(set(r["specialization"] for r in rows))
+        available = ", ".join(sorted(set(r["specialization"] for r in rows)))
         raise HTTPException(404, f"No doctors found for '{spec_sq}'. Available: {available}")
     return {"doctors": doctors[:3]}
